@@ -29,6 +29,10 @@ class _FiltroScreenState extends State<FiltroScreen> {
   int? _categoriaId; // null = todas
   int? _subcategoriaId; // null = todas
 
+  /// 'movimientos' = la lista de siempre, 'categorias' = el reporte de
+  /// mayor a menor gasto/ingreso por categoría.
+  String _vista = 'movimientos';
+
   @override
   void initState() {
     super.initState();
@@ -80,6 +84,33 @@ class _FiltroScreenState extends State<FiltroScreen> {
 
   double get _totalEgresos =>
       _filtrados.where((m) => !m.esIngreso).fold(0.0, (s, m) => s + m.monto);
+
+  /// Agrupa los movimientos filtrados según [clave] (nombre de categoría o
+  /// subcategoría), sumando el monto de cada grupo y ordenando de mayor a
+  /// menor. Usado por los reportes "Por categoría" y "Por subcategoría".
+  Map<String, double> _totales({
+    required bool esIngreso,
+    required String Function(Movimiento) clave,
+  }) {
+    final mapa = <String, double>{};
+    for (final m in _filtrados) {
+      if (m.esIngreso != esIngreso) continue;
+      final nombre = clave(m);
+      mapa[nombre] = (mapa[nombre] ?? 0) + m.monto;
+    }
+    final entradas = mapa.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+    return {for (final e in entradas) e.key: e.value};
+  }
+
+  Map<String, double> _totalesPorCategoria({required bool esIngreso}) => _totales(
+        esIngreso: esIngreso,
+        clave: (m) => m.categoriaNombre ?? 'Sin categoría',
+      );
+
+  Map<String, double> _totalesPorSubcategoria({required bool esIngreso}) => _totales(
+        esIngreso: esIngreso,
+        clave: (m) => m.subcategoriaNombre ?? 'Sin subcategoría',
+      );
 
   void _limpiarFiltros() {
     setState(() {
@@ -250,6 +281,43 @@ class _FiltroScreenState extends State<FiltroScreen> {
                   ),
                 ),
                 const SizedBox(height: 14),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: SegmentedButton<String>(
+                    // Que ocupe todo el ancho disponible, repartido en
+                    // partes iguales entre los 3 botones, en vez de que
+                    // cada uno mida según su texto (eso era lo que hacía
+                    // que "Subcategoría" se cortara en pantallas angostas).
+                    expandedInsets: EdgeInsets.zero,
+                    style: SegmentedButton.styleFrom(
+                      selectedBackgroundColor: esquema.primaryContainer,
+                      selectedForegroundColor: esquema.onPrimaryContainer,
+                      side: BorderSide(color: esquema.outlineVariant),
+                      textStyle: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600),
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      shape: const RoundedRectangleBorder(
+                        borderRadius: BorderRadius.all(Radius.circular(12)),
+                      ),
+                    ),
+                    segments: const [
+                      ButtonSegment(
+                        value: 'movimientos',
+                        label: Text('Movimientos', overflow: TextOverflow.ellipsis),
+                      ),
+                      ButtonSegment(
+                        value: 'categorias',
+                        label: Text('Categoría', overflow: TextOverflow.ellipsis),
+                      ),
+                      ButtonSegment(
+                        value: 'subcategorias',
+                        label: Text('Subcategoría', overflow: TextOverflow.ellipsis),
+                      ),
+                    ],
+                    selected: {_vista},
+                    onSelectionChanged: (seleccion) => setState(() => _vista = seleccion.first),
+                  ),
+                ),
+                const SizedBox(height: 14),
                 Expanded(
                   child: _filtrados.isEmpty
                       ? Center(
@@ -258,13 +326,29 @@ class _FiltroScreenState extends State<FiltroScreen> {
                             style: TextStyle(color: esquema.onSurfaceVariant),
                           ),
                         )
-                      : ListView.builder(
-                          padding: const EdgeInsets.only(bottom: 16),
-                          itemCount: _filtrados.length,
-                          itemBuilder: (context, index) {
-                            return _FilaResultado(movimiento: _filtrados[index]);
-                          },
-                        ),
+                      : switch (_vista) {
+                          'categorias' => _ReporteCategorias(
+                              etiqueta: 'CATEGORÍA',
+                              egresos: _totalesPorCategoria(esIngreso: false),
+                              totalEgresos: _totalEgresos,
+                              ingresos: _totalesPorCategoria(esIngreso: true),
+                              totalIngresos: _totalIngresos,
+                            ),
+                          'subcategorias' => _ReporteCategorias(
+                              etiqueta: 'SUBCATEGORÍA',
+                              egresos: _totalesPorSubcategoria(esIngreso: false),
+                              totalEgresos: _totalEgresos,
+                              ingresos: _totalesPorSubcategoria(esIngreso: true),
+                              totalIngresos: _totalIngresos,
+                            ),
+                          _ => ListView.builder(
+                              padding: const EdgeInsets.only(bottom: 16),
+                              itemCount: _filtrados.length,
+                              itemBuilder: (context, index) {
+                                return _FilaResultado(movimiento: _filtrados[index]);
+                              },
+                            ),
+                        },
                 ),
               ],
             ),
@@ -402,6 +486,176 @@ class _FilaResultado extends StatelessWidget {
               fontWeight: FontWeight.w700,
               color: finanzas.color(esIngreso),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// El reporte "Por categoría": una lista de gastos por categoría (de mayor
+/// a menor) y, si hay, otra de ingresos por categoría, cada una con una
+/// barra que muestra qué tanto pesa esa categoría sobre el total.
+class _ReporteCategorias extends StatelessWidget {
+  const _ReporteCategorias({
+    required this.etiqueta,
+    required this.egresos,
+    required this.totalEgresos,
+    required this.ingresos,
+    required this.totalIngresos,
+  });
+
+  /// 'CATEGORÍA' o 'SUBCATEGORÍA', para armar los títulos de cada sección.
+  final String etiqueta;
+  final Map<String, double> egresos;
+  final double totalEgresos;
+  final Map<String, double> ingresos;
+  final double totalIngresos;
+
+  @override
+  Widget build(BuildContext context) {
+    final esquema = Theme.of(context).colorScheme;
+    final finanzas = ColoresFinanzas.de(context);
+
+    if (egresos.isEmpty && ingresos.isEmpty) {
+      return Center(
+        child: Text(
+          'No hay nada que agrupar todavía',
+          style: TextStyle(color: esquema.onSurfaceVariant),
+        ),
+      );
+    }
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      children: [
+        if (egresos.isNotEmpty) ...[
+          _TituloReporte(texto: 'GASTOS POR $etiqueta', color: finanzas.egreso),
+          const SizedBox(height: 10),
+          ...egresos.entries.map(
+            (entrada) => _FilaReporteCategoria(
+              nombre: entrada.key,
+              monto: entrada.value,
+              proporcion: totalEgresos > 0 ? entrada.value / totalEgresos : 0,
+              color: finanzas.egreso,
+            ),
+          ),
+          if (ingresos.isNotEmpty) const SizedBox(height: 20),
+        ],
+        if (ingresos.isNotEmpty) ...[
+          _TituloReporte(texto: 'INGRESOS POR $etiqueta', color: finanzas.ingreso),
+          const SizedBox(height: 10),
+          ...ingresos.entries.map(
+            (entrada) => _FilaReporteCategoria(
+              nombre: entrada.key,
+              monto: entrada.value,
+              proporcion: totalIngresos > 0 ? entrada.value / totalIngresos : 0,
+              color: finanzas.ingreso,
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _TituloReporte extends StatelessWidget {
+  const _TituloReporte({required this.texto, required this.color});
+
+  final String texto;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Container(width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+        const SizedBox(width: 8),
+        Text(
+          texto,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 1.0,
+            color: color,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Una fila del reporte: nombre de la categoría, monto, y una barrita que
+/// muestra qué porcentaje del total (de ese tipo) representa. La lista que
+/// la contiene ya viene ordenada de mayor a menor.
+class _FilaReporteCategoria extends StatelessWidget {
+  const _FilaReporteCategoria({
+    required this.nombre,
+    required this.monto,
+    required this.proporcion,
+    required this.color,
+  });
+
+  final String nombre;
+  final double monto;
+  final double proporcion;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final esquema = Theme.of(context).colorScheme;
+    final porcentaje = (proporcion.clamp(0, 1) * 100).round();
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: esquema.surfaceContainerLowest,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: esquema.outlineVariant.withValues(alpha: 0.55)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  nombre,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w600),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                formatearBs(monto),
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: color),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                return Stack(
+                  children: [
+                    Container(height: 8, width: constraints.maxWidth, color: color.withValues(alpha: 0.15)),
+                    Container(
+                      height: 8,
+                      width: constraints.maxWidth * proporcion.clamp(0, 1),
+                      color: color,
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            '$porcentaje% del total',
+            style: TextStyle(fontSize: 11.5, color: esquema.onSurfaceVariant),
           ),
         ],
       ),

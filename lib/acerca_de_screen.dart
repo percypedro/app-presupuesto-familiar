@@ -9,7 +9,7 @@ class AcercaDeScreen extends StatelessWidget {
   const AcercaDeScreen({super.key});
 
   static const _correoDesarrollador = 'devpercypedrofuentesramos@gmail.com';
-  static const _version = '1.3.0';
+  static const _version = '1.4.0';
 
   Future<void> _copiarCorreo(BuildContext context) async {
     await Clipboard.setData(const ClipboardData(text: _correoDesarrollador));
