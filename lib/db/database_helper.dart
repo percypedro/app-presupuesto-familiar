@@ -348,6 +348,41 @@ class DatabaseHelper {
     };
   }
 
+  /// Igual que [exportarTodo], pero para CUALQUIER perfil por nombre, no
+  /// solo el que está abierto ahora mismo. Se usa para exportar todos los
+  /// perfiles de una vez. Si el perfil pedido es el que ya está activo,
+  /// reutiliza esa misma conexión (no abre otra) para no arriesgar cerrar
+  /// por accidente la conexión que usa el resto de la app.
+  Future<Map<String, List<Map<String, Object?>>>> exportarPerfil(
+    String nombrePerfil,
+  ) async {
+    if (nombrePerfil == _perfilActivo) {
+      return exportarTodo();
+    }
+
+    final ruta = await rutaBaseDeDatos(nombrePerfil);
+    if (!await File(ruta).exists()) {
+      return {'cuentas': [], 'categorias': [], 'subcategorias': [], 'movimientos': []};
+    }
+
+    final db = await openDatabase(
+      ruta,
+      version: _version,
+      onCreate: _crearTablas,
+      onUpgrade: _actualizarTablas,
+    );
+    try {
+      return {
+        'cuentas': await db.query('cuentas'),
+        'categorias': await db.query('categorias'),
+        'subcategorias': await db.query('subcategorias'),
+        'movimientos': await db.query('movimientos'),
+      };
+    } finally {
+      await db.close();
+    }
+  }
+
   /// Reconstruye por completo el perfil [nombrePerfil] a partir de los
   /// datos importados (si ya existía, se borra y se reemplaza). Los ids
   /// se vuelven a generar y las relaciones (cuenta/categoría/subcategoría

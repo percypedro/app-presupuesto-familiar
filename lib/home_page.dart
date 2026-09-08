@@ -62,10 +62,33 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Future<void> _importar() async {
-    String? nombreImportado;
+  Future<void> _exportarTodosLosPerfiles() async {
+    if (_exportando) return;
+    setState(() => _exportando = true);
     try {
-      nombreImportado = await ExportarImportarService().importarDesdeArchivo();
+      final perfiles = await PerfilService().obtenerPerfiles();
+      if (perfiles.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No hay perfiles para exportar')),
+        );
+        return;
+      }
+      await ExportarImportarService().exportarTodosLosPerfiles(perfiles);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo exportar: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _exportando = false);
+    }
+  }
+
+  Future<void> _importar() async {
+    List<String>? nombresImportados;
+    try {
+      nombresImportados = await ExportarImportarService().importarDesdeArchivo();
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -74,41 +97,70 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    if (nombreImportado == null || !mounted) return; // el usuario canceló
+    if (nombresImportados == null || nombresImportados.isEmpty || !mounted) {
+      return; // el usuario canceló
+    }
 
-    await PerfilService().agregarPerfil(nombreImportado);
+    for (final nombre in nombresImportados) {
+      await PerfilService().agregarPerfil(nombre);
+    }
     if (!mounted) return;
 
-    final cambiarAhora = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Importación completa'),
-        content: Text(
-          'Se importaron los datos del perfil "$nombreImportado". '
-          '¿Quieres cambiar a ese perfil ahora?',
+    // Si se importó un solo perfil, preguntamos si se quiere cambiar a él
+    // de una vez (como antes). Si fueron varios, no hay uno "obvio" al
+    // cual cambiar, así que solo avisamos y el usuario elige desde
+    // "Cambiar de perfil".
+    if (nombresImportados.length == 1) {
+      final nombreImportado = nombresImportados.first;
+      final cambiarAhora = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Importación completa'),
+          content: Text(
+            'Se importaron los datos del perfil "$nombreImportado". '
+            '¿Quieres cambiar a ese perfil ahora?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Quedarme aquí'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Cambiar ahora'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Quedarme aquí'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Cambiar ahora'),
-          ),
-        ],
-      ),
-    );
+      );
 
-    if (cambiarAhora != true) return;
+      if (cambiarAhora != true) return;
 
-    await PerfilService().establecerPerfilActivo(nombreImportado);
-    await DatabaseHelper.instancia.abrirPerfil(nombreImportado);
-    if (!mounted) return;
-    Navigator.of(context).pushAndRemoveUntil(
-      MaterialPageRoute(builder: (context) => const HomePage()),
-      (route) => false,
-    );
+      await PerfilService().establecerPerfilActivo(nombreImportado);
+      await DatabaseHelper.instancia.abrirPerfil(nombreImportado);
+      if (!mounted) return;
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (context) => const HomePage()),
+        (route) => false,
+      );
+    } else {
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Importación completa'),
+          content: Text(
+            'Se importaron ${nombresImportados!.length} perfiles: '
+            '${nombresImportados.join(', ')}. Puedes cambiar a cualquiera '
+            'de ellos desde "Cambiar de perfil".',
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Entendido'),
+            ),
+          ],
+        ),
+      );
+    }
   }
 
   List<Movimiento> get _movimientosDelMes {
@@ -126,7 +178,38 @@ class _HomePageState extends State<HomePage> {
       .where((m) => !m.esIngreso)
       .fold(0.0, (suma, m) => suma + m.monto);
 
-  double get _balanceMes => _ingresosMes - _egresosMes;
+  /// Saldo total: suma TODOS los movimientos históricos (no solo los del
+  /// mes actual), para que lo que sobra o falta de un mes se arrastre al
+  /// siguiente en vez de reiniciarse cada mes.
+  double get _saldoTotal => _movimientos.fold(
+        0.0,
+        (suma, m) => suma + (m.esIngreso ? m.monto : -m.monto),
+      );
+
+  /// Lo que ya tenías acumulado ANTES de este mes (saldo total menos lo
+  /// que entró/salió en el mes actual). Se muestra aparte para que el
+  /// saldo total no parezca "no cuadrar" con Ingresos/Egresos del mes.
+  double get _saldoAntesDelMes => _saldoTotal - _ingresosMes + _egresosMes;
+
+  /// Lo que dejó el mes actual por sí solo (ingresos - egresos de este
+  /// mes). Junto con _saldoAntesDelMes, estos dos números suman
+  /// exactamente _saldoTotal.
+  double get _saldoDelMes => _ingresosMes - _egresosMes;
+
+  /// El saldo que quedaba justo después de cada movimiento (como en los
+  /// movimientos bancarios). _movimientos está ordenado del más reciente
+  /// al más antiguo, así que el saldo "después de" el primero es el saldo
+  /// total, y de ahí para abajo se le va restando cada movimiento más
+  /// reciente para saber cuánto había en ese momento.
+  List<double> get _saldosDespuesDeCadaMovimiento {
+    final resultado = <double>[];
+    var acumulado = _saldoTotal;
+    for (final m in _movimientos) {
+      resultado.add(acumulado);
+      acumulado -= m.esIngreso ? m.monto : -m.monto;
+    }
+    return resultado;
+  }
 
   Future<void> _eliminarMovimiento(Movimiento movimiento) async {
     await DatabaseHelper.instancia.eliminarMovimiento(movimiento.id!);
@@ -231,6 +314,9 @@ class _HomePageState extends State<HomePage> {
                   case 'exportar':
                     _exportar();
                     break;
+                  case 'exportar_todos':
+                    _exportarTodosLosPerfiles();
+                    break;
                   case 'importar':
                     _importar();
                     break;
@@ -257,6 +343,15 @@ class _HomePageState extends State<HomePage> {
                     contentPadding: EdgeInsets.zero,
                     leading: Icon(Icons.ios_share_rounded),
                     title: Text('Exportar mis datos'),
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: 'exportar_todos',
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.folder_zip_outlined),
+                    title: Text('Exportar todos los perfiles'),
                   ),
                 ),
                 const PopupMenuItem(
@@ -306,7 +401,9 @@ class _HomePageState extends State<HomePage> {
           : Column(
               children: [
                 _TarjetaBalance(
-                  balance: _balanceMes,
+                  balance: _saldoTotal,
+                  saldoAntes: _saldoAntesDelMes,
+                  saldoDelMes: _saldoDelMes,
                   ingresos: _ingresosMes,
                   egresos: _egresosMes,
                 ),
@@ -339,15 +436,23 @@ class _HomePageState extends State<HomePage> {
                 Expanded(
                   child: _movimientos.isEmpty
                       ? const _EstadoVacio()
-                      : ListView.builder(
-                          padding: const EdgeInsets.only(bottom: 96),
-                          itemCount: _movimientos.length,
-                          itemBuilder: (context, index) {
-                            final movimiento = _movimientos[index];
-                            return _FilaMovimiento(
-                              movimiento: movimiento,
-                              onTap: () => _mostrarDialogoMovimiento(existente: movimiento),
-                              onEliminar: () => _eliminarMovimiento(movimiento),
+                      : Builder(
+                          builder: (context) {
+                            // Se calcula una sola vez por reconstrucción, no
+                            // en cada fila, para no recorrer la lista N².
+                            final saldosPorFila = _saldosDespuesDeCadaMovimiento;
+                            return ListView.builder(
+                              padding: const EdgeInsets.only(bottom: 96),
+                              itemCount: _movimientos.length,
+                              itemBuilder: (context, index) {
+                                final movimiento = _movimientos[index];
+                                return _FilaMovimiento(
+                                  movimiento: movimiento,
+                                  saldoDespues: saldosPorFila[index],
+                                  onTap: () => _mostrarDialogoMovimiento(existente: movimiento),
+                                  onEliminar: () => _eliminarMovimiento(movimiento),
+                                );
+                              },
                             );
                           },
                         ),
@@ -379,18 +484,51 @@ String _subtituloMovimiento(Movimiento movimiento) {
   return partes.where((p) => p.isNotEmpty).join(' · ');
 }
 
-/// Una fila de la lista de movimientos. Se ve como una tarjeta y se puede
-/// deslizar hacia la izquierda para borrar.
+/// Una fila de la lista de movimientos. Se ve como una tarjeta; para
+/// borrarla hay que tocar el ícono de basurero (y confirmar), ya no se
+/// desliza con el dedo.
 class _FilaMovimiento extends StatelessWidget {
   const _FilaMovimiento({
     required this.movimiento,
+    required this.saldoDespues,
     required this.onTap,
     required this.onEliminar,
   });
 
   final Movimiento movimiento;
+
+  /// El saldo que quedaba justo después de este movimiento, como en los
+  /// movimientos bancarios del celular.
+  final double saldoDespues;
   final VoidCallback onTap;
   final VoidCallback onEliminar;
+
+  Future<void> _confirmarEliminar(BuildContext context) async {
+    final confirmar = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('¿Eliminar este movimiento?'),
+        content: Text(
+          '"${movimiento.descripcion}" · ${formatearBs(movimiento.monto)}\n'
+          'Esta acción no se puede deshacer.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: ColoresFinanzas.de(context).egreso,
+            ),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Eliminar'),
+          ),
+        ],
+      ),
+    );
+    if (confirmar == true) onEliminar();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -401,80 +539,90 @@ class _FilaMovimiento extends StatelessWidget {
     const margen = EdgeInsets.symmetric(horizontal: 16, vertical: 4);
     final radio = BorderRadius.circular(16);
 
-    return Dismissible(
-      key: ValueKey(movimiento.id),
-      direction: DismissDirection.endToStart,
-      background: Container(
-        margin: margen,
-        alignment: Alignment.centerRight,
-        padding: const EdgeInsets.only(right: 22),
-        decoration: BoxDecoration(color: finanzas.egreso, borderRadius: radio),
-        child: const Icon(Icons.delete_outline_rounded, color: Colors.white),
+    return Container(
+      margin: margen,
+      decoration: BoxDecoration(
+        color: esquema.surfaceContainerLowest,
+        borderRadius: radio,
+        border: Border.all(color: esquema.outlineVariant.withValues(alpha: 0.55)),
       ),
-      onDismissed: (_) => onEliminar(),
-      child: Container(
-        margin: margen,
-        decoration: BoxDecoration(
-          color: esquema.surfaceContainerLowest,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
           borderRadius: radio,
-          border: Border.all(color: esquema.outlineVariant.withValues(alpha: 0.55)),
-        ),
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            onTap: onTap,
-            borderRadius: radio,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-              child: Row(
-                children: [
-                  Container(
-                    width: 42,
-                    height: 42,
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      color: finanzas.colorSuave(esIngreso),
-                      shape: BoxShape.circle,
-                    ),
-                    child: Icon(
-                      esIngreso ? Icons.arrow_upward_rounded : Icons.arrow_downward_rounded,
-                      size: 20,
-                      color: finanzas.color(esIngreso),
-                    ),
+          child: Padding(
+            padding: const EdgeInsets.only(left: 14, right: 6, top: 12, bottom: 12),
+            child: Row(
+              children: [
+                Container(
+                  width: 42,
+                  height: 42,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: finanzas.colorSuave(esIngreso),
+                    shape: BoxShape.circle,
                   ),
-                  const SizedBox(width: 14),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          movimiento.descripcion,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-                        ),
-                        const SizedBox(height: 3),
-                        Text(
-                          _subtituloMovimiento(movimiento),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(fontSize: 12.5, color: esquema.onSurfaceVariant),
-                        ),
-                      ],
-                    ),
+                  child: Icon(
+                    esIngreso ? Icons.arrow_upward_rounded : Icons.arrow_downward_rounded,
+                    size: 20,
+                    color: finanzas.color(esIngreso),
                   ),
-                  const SizedBox(width: 10),
-                  Text(
-                    '${esIngreso ? '+' : '−'} ${formatearBs(movimiento.monto)}',
-                    style: TextStyle(
-                      fontSize: 14.5,
-                      fontWeight: FontWeight.w700,
-                      color: finanzas.color(esIngreso),
-                    ),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        movimiento.descripcion,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        _subtituloMovimiento(movimiento),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 12.5, color: esquema.onSurfaceVariant),
+                      ),
+                    ],
                   ),
-                ],
-              ),
+                ),
+                const SizedBox(width: 8),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      '${esIngreso ? '+' : '−'} ${formatearBs(movimiento.monto)}',
+                      style: TextStyle(
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w700,
+                        color: finanzas.color(esIngreso),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Saldo ${formatearBs(saldoDespues)}',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: esquema.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+                IconButton(
+                  onPressed: () => _confirmarEliminar(context),
+                  icon: const Icon(Icons.delete_outline_rounded),
+                  iconSize: 20,
+                  color: finanzas.egreso,
+                  tooltip: 'Eliminar',
+                  visualDensity: VisualDensity.compact,
+                ),
+              ],
             ),
           ),
         ),
@@ -488,18 +636,30 @@ class _FilaMovimiento extends StatelessWidget {
 class _TarjetaBalance extends StatelessWidget {
   const _TarjetaBalance({
     required this.balance,
+    required this.saldoAntes,
+    required this.saldoDelMes,
     required this.ingresos,
     required this.egresos,
   });
 
   final double balance;
+
+  /// Lo que ya se tenía acumulado antes de este mes. Se muestra para que
+  /// se entienda por qué el saldo total no es simplemente "Ingresos -
+  /// Egresos" del mes: también arrastra esto de meses anteriores.
+  final double saldoAntes;
+
+  /// Lo que dejó el mes actual por sí solo (ingresos - egresos). Junto a
+  /// [saldoAntes], estos dos números suman exactamente [balance].
+  final double saldoDelMes;
   final double ingresos;
   final double egresos;
 
   @override
   Widget build(BuildContext context) {
     final esquema = Theme.of(context).colorScheme;
-    final mes = nombresMeses[DateTime.now().month - 1].toUpperCase();
+    final mesCapitalizado = nombresMeses[DateTime.now().month - 1];
+    final mes = mesCapitalizado.toUpperCase();
 
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 8, 16, 20),
@@ -526,7 +686,7 @@ class _TarjetaBalance extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'BALANCE DE $mes',
+            'SALDO ACTUAL',
             style: TextStyle(
               fontSize: 11,
               fontWeight: FontWeight.w700,
@@ -544,7 +704,39 @@ class _TarjetaBalance extends StatelessWidget {
               color: esquema.onPrimary,
             ),
           ),
+          if (saldoAntes != 0) ...[
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: _ChipSaldo(
+                    icono: Icons.history_rounded,
+                    etiqueta: 'Saldo mes anterior',
+                    monto: saldoAntes,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _ChipSaldo(
+                    icono: Icons.calendar_today_rounded,
+                    etiqueta: 'Saldo de $mesCapitalizado',
+                    monto: saldoDelMes,
+                  ),
+                ),
+              ],
+            ),
+          ],
           const SizedBox(height: 20),
+          Text(
+            'DETALLE DE $mes',
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1.0,
+              color: esquema.onPrimary.withValues(alpha: 0.55),
+            ),
+          ),
+          const SizedBox(height: 8),
           Row(
             children: [
               Expanded(
@@ -570,6 +762,71 @@ class _TarjetaBalance extends StatelessWidget {
                 ),
               ),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Recuadrito usado en la tarjeta de saldo para mostrar "Mes anterior" y
+/// "Saldo de [mes]" uno al lado del otro, para que se vea claro que esos
+/// dos números suman el saldo actual de arriba.
+class _ChipSaldo extends StatelessWidget {
+  const _ChipSaldo({
+    required this.icono,
+    required this.etiqueta,
+    required this.monto,
+  });
+
+  final IconData icono;
+  final String etiqueta;
+  final double monto;
+
+  @override
+  Widget build(BuildContext context) {
+    final esquema = Theme.of(context).colorScheme;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: esquema.onPrimary.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Icon(icono, size: 14, color: esquema.onPrimary.withValues(alpha: 0.8)),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  etiqueta,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    color: esquema.onPrimary.withValues(alpha: 0.85),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(
+              formatearBs(monto),
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+                color: esquema.onPrimary,
+              ),
+            ),
           ),
         ],
       ),

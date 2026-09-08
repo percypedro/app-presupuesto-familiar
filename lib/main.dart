@@ -2,6 +2,7 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'app_inicio.dart';
@@ -30,6 +31,16 @@ class GastosApp extends StatelessWidget {
       darkTheme: temaOscuro,
       // La app sigue el modo que tenga puesto el celular (claro u oscuro).
       themeMode: ThemeMode.system,
+      // Fuerza español en los textos propios de Flutter (selector de
+      // fecha, botones "Cancelar"/"OK", etc.), sin importar el idioma
+      // del celular.
+      locale: const Locale('es'),
+      supportedLocales: const [Locale('es'), Locale('en')],
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
       home: const AppInicio(),
     );
   }
